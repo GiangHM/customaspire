@@ -16,13 +16,13 @@ namespace Aspire.Dashboard.Otlp.Storage.Persistence;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Trace data is stored in two tables: <c>SpanBatches</c> stores the full serialised
+/// Trace data is stored in two tables: <c>SpanBatches</c> stores the full serialized
 /// <see cref="ResourceSpans"/> protobuf payload for lossless replay, while <c>Spans</c>
 /// maintains a structured index that includes the <c>parent_span_id</c> column so that
 /// parent-child relationships between spans can be queried directly.
 /// </para>
 /// <para>
-/// Log and metric data are stored as serialised protobuf blobs in <c>LogBatches</c> and
+/// Log and metric data are stored as serialized protobuf blobs in <c>LogBatches</c> and
 /// <c>MetricBatches</c> tables respectively, which are sufficient for startup-replay purposes.
 /// </para>
 /// <para>
@@ -66,7 +66,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 
         await CreateSchemaAsync(cancellationToken).ConfigureAwait(false);
 
-        _logger.LogDebug("SQLite telemetry storage initialised at '{Path}'.", _databasePath);
+        _logger.LogDebug("SQLite telemetry storage initialized at '{Path}'.", _databasePath);
     }
 
     private async Task CreateSchemaAsync(CancellationToken cancellationToken)
@@ -228,7 +228,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to deserialise a ResourceSpans row; skipping.");
+                _logger.LogWarning(ex, "Failed to deserialize a ResourceSpans row; skipping.");
                 continue;
             }
 
@@ -256,7 +256,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to deserialise a ResourceLogs row; skipping.");
+                _logger.LogWarning(ex, "Failed to deserialize a ResourceLogs row; skipping.");
                 continue;
             }
 
@@ -284,7 +284,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to deserialise a ResourceMetrics row; skipping.");
+                _logger.LogWarning(ex, "Failed to deserialize a ResourceMetrics row; skipping.");
                 continue;
             }
 
@@ -306,7 +306,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     {
         if (_connection is null)
         {
-            throw new InvalidOperationException($"{nameof(SqliteTelemetryStorage)} has not been initialised. Call {nameof(InitializeAsync)} first.");
+            throw new InvalidOperationException($"{nameof(SqliteTelemetryStorage)} has not been initialized. Call {nameof(InitializeAsync)} first.");
         }
     }
 
