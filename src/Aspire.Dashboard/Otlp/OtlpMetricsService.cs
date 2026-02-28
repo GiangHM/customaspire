@@ -3,7 +3,6 @@
 
 using Aspire.Dashboard.Otlp.Model;
 using Aspire.Dashboard.Otlp.Storage;
-using Aspire.Dashboard.Otlp.Storage.Persistence;
 using Microsoft.AspNetCore.Mvc;
 using OpenTelemetry.Proto.Collector.Metrics.V1;
 
@@ -14,13 +13,11 @@ public sealed class OtlpMetricsService
 {
     private readonly ILogger<OtlpMetricsService> _logger;
     private readonly TelemetryRepository _telemetryRepository;
-    private readonly ITelemetryStorage _storage;
 
-    public OtlpMetricsService(ILogger<OtlpMetricsService> logger, TelemetryRepository telemetryRepository, ITelemetryStorage storage)
+    public OtlpMetricsService(ILogger<OtlpMetricsService> logger, TelemetryRepository telemetryRepository)
     {
         _logger = logger;
         _telemetryRepository = telemetryRepository;
-        _storage = storage;
     }
 
     public ExportMetricsServiceResponse Export(ExportMetricsServiceRequest request)
@@ -29,20 +26,6 @@ public sealed class OtlpMetricsService
         _telemetryRepository.AddMetrics(addContext, request.ResourceMetrics);
 
         _logger.LogDebug("Processed metrics export. Success count: {SuccessCount}, failure count: {FailureCount}", addContext.SuccessCount, addContext.FailureCount);
-
-        // Persist each resource metrics batch to storage (fire-and-forget).
-        foreach (var resourceMetrics in request.ResourceMetrics)
-        {
-            var task = _storage.WriteMetricsAsync(resourceMetrics);
-            if (!task.IsCompletedSuccessfully)
-            {
-                _ = task.ContinueWith(
-                    t => _logger.LogWarning(t.Exception, "Error persisting resource metrics to storage."),
-                    CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted,
-                    TaskScheduler.Default);
-            }
-        }
 
         return new ExportMetricsServiceResponse
         {
