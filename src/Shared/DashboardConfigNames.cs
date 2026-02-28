@@ -51,6 +51,7 @@ internal static class DashboardConfigNames
     public static readonly ConfigName DebugSessionTelemetryOptOutName = new("Dashboard:DebugSession:TelemetryOptOut", "DASHBOARD__DEBUGSESSION__TELEMETRYOPTOUT");
     public static readonly ConfigName UIDisableResourceGraphName = new("Dashboard:UI:DisableResourceGraph", "DASHBOARD__UI__DISABLERESOURCEGRAPH");
     public static readonly ConfigName UIDisableImportName = new("Dashboard:UI:DisableImport", "DASHBOARD__UI__DISABLEIMPORT");
+    public static readonly ConfigName DashboardStorageSqlitePathName = new("Dashboard:Storage:SqlitePath", "DASHBOARD__STORAGE__SQLITEPATH");
 
     public static class Legacy
     {

@@ -1065,6 +1065,44 @@ public class StartupTests(ITestOutputHelper testOutputHelper)
         Assert.Equal(!(value ?? false), aiContextProvider.Enabled);
     }
 
+    [Fact]
+    public async Task StorageOptions_SqlitePathNotConfigured_RegistersNullTelemetryStorage()
+    {
+        // Arrange & Act
+        await using var app = IntegrationTestHelpers.CreateDashboardWebApplication(testOutputHelper);
+
+        // Assert
+        var storage = app.Services.GetRequiredService<Aspire.Dashboard.Otlp.Storage.Persistence.ITelemetryStorage>();
+        Assert.IsType<Aspire.Dashboard.Otlp.Storage.Persistence.NullTelemetryStorage>(storage);
+    }
+
+    [Fact]
+    public async Task StorageOptions_SqlitePathConfigured_RegistersSqliteTelemetryStorage()
+    {
+        // Arrange
+        var dbPath = Path.Combine(Path.GetTempPath(), $"aspire-di-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            // Act
+            await using var app = IntegrationTestHelpers.CreateDashboardWebApplication(testOutputHelper,
+                additionalConfiguration: data =>
+                {
+                    data[DashboardConfigNames.DashboardStorageSqlitePathName.ConfigKey] = dbPath;
+                });
+
+            // Assert
+            var storage = app.Services.GetRequiredService<Aspire.Dashboard.Otlp.Storage.Persistence.ITelemetryStorage>();
+            Assert.IsType<Aspire.Dashboard.Otlp.Storage.Persistence.SqliteTelemetryStorage>(storage);
+        }
+        finally
+        {
+            if (File.Exists(dbPath))
+            {
+                File.Delete(dbPath);
+            }
+        }
+    }
+
     private static void AssertIPv4OrIPv6Endpoint(Func<ResolvedEndpointInfo> endPointAccessor)
     {
         // Check that the address is IPv4 or IPv6 any.
