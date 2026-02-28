@@ -21,6 +21,20 @@ public sealed class DashboardOptions
     public DebugSessionOptions DebugSession { get; set; } = new();
     public UIOptions UI { get; set; } = new();
     public AIOptions AI { get; set; } = new();
+    public StorageOptions Storage { get; set; } = new();
+}
+
+/// <summary>
+/// Options for configuring persistent telemetry storage.
+/// </summary>
+public sealed class StorageOptions
+{
+    /// <summary>
+    /// Gets or sets the file path for the SQLite database used for telemetry persistence.
+    /// When <c>null</c> or empty, persistence is disabled and a no-op storage is used.
+    /// Configure via <c>Dashboard:Storage:SqlitePath</c>.
+    /// </summary>
+    public string? SqlitePath { get; set; }
 }
 
 // Don't set values after validating/parsing options.
