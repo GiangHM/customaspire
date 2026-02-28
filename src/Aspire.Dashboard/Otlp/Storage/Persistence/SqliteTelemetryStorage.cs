@@ -238,7 +238,6 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             return DateTime.UtcNow.ToString("o");
         }
 
-        var ticks = (long)(minNanos / 100);
-        return new DateTime(ticks, DateTimeKind.Utc).ToString("o");
+        return DateTime.UnixEpoch.AddTicks((long)(minNanos / 100)).ToString("o");
     }
 }

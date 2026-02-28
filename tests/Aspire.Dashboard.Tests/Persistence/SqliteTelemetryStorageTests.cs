@@ -29,7 +29,14 @@ public class SqliteTelemetryStorageTests : IAsyncDisposable
 
         if (File.Exists(_dbPath))
         {
-            File.Delete(_dbPath);
+            try
+            {
+                File.Delete(_dbPath);
+            }
+            catch
+            {
+                // Best-effort cleanup; don't let file-locking issues mask test failures.
+            }
         }
     }
 
@@ -82,7 +89,7 @@ public class SqliteTelemetryStorageTests : IAsyncDisposable
         // Arrange
         await _storage.InitializeAsync();
 
-        var baseNanos = (ulong)new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks * 100;
+        var baseNanos = (ulong)new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds() * 1_000_000;
         var rl1 = CreateResourceLogs("Service1", "i1", timeUnixNano: baseNanos + 1000);
         var rl2 = CreateResourceLogs("Service2", "i2", timeUnixNano: baseNanos + 2000);
         var rl3 = CreateResourceLogs("Service3", "i3", timeUnixNano: baseNanos + 3000);
