@@ -1120,9 +1120,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             AddTracesCore(context, resourceView, rs.ScopeSpans);
             SetResourceHasTraces(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rs);
         }
 
         RaiseSubscriptionChanged(_tracesSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceSpans resourceSpans)
+    {
+        try
+        {
+            await _storage.WriteSpansAsync(resourceSpans).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist span batch to storage.");
+        }
     }
 
     private static OtlpSpanStatusCode ConvertStatus(Status? status)

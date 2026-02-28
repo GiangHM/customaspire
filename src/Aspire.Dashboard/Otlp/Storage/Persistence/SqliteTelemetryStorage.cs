@@ -16,6 +16,24 @@ namespace Aspire.Dashboard.Otlp.Storage.Persistence;
 /// SQLite-backed implementation of <see cref="ITelemetryStorage"/> for persistent telemetry storage.
 /// Stores OTLP telemetry payloads so that they survive dashboard restarts.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Spans are stored in two related tables:
+/// <list type="bullet">
+/// <item>
+/// <term><c>spans</c></term>
+/// <description>Stores the full serialized <see cref="ResourceSpans"/> proto payload (one row per write call) for lossless startup replay.</description>
+/// </item>
+/// <item>
+/// <term><c>span_index</c></term>
+/// <description>Structured per-span rows with a <c>parent_span_id</c> column that is <see langword="null"/> for root spans, enabling direct parent-child relationship queries.</description>
+/// </item>
+/// </list>
+/// </para>
+/// <para>
+/// Log and metric data are stored in <c>logs</c> and <c>metrics</c> tables respectively as proto blobs, which are sufficient for startup replay.
+/// </para>
+/// </remarks>
 internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 {
     private readonly string _databasePath;
@@ -64,13 +82,30 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             CREATE INDEX IF NOT EXISTS idx_logs_timestamp     ON logs (timestamp);
             """;
 
-        const string createSpansTable = """
+        // 'spans' stores the full ResourceSpans proto blob per WriteSpansAsync call for lossless replay.
+        // 'span_index' provides a structured per-span index with parent-child relationship support.
+        const string createSpansTables = """
             CREATE TABLE IF NOT EXISTS spans (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 resource_key TEXT    NOT NULL,
                 payload      BLOB    NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_spans_resource_key ON spans (resource_key);
+
+            CREATE TABLE IF NOT EXISTS span_index (
+                span_id              TEXT    NOT NULL PRIMARY KEY,
+                trace_id             TEXT    NOT NULL,
+                parent_span_id       TEXT,
+                spans_id             INTEGER NOT NULL,
+                name                 TEXT    NOT NULL,
+                kind                 INTEGER NOT NULL,
+                start_time_unix_nano INTEGER NOT NULL,
+                end_time_unix_nano   INTEGER NOT NULL,
+                status_code          INTEGER NOT NULL,
+                FOREIGN KEY (spans_id) REFERENCES spans(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_span_index_trace_id       ON span_index (trace_id);
+            CREATE INDEX IF NOT EXISTS idx_span_index_parent_span_id ON span_index (parent_span_id);
             """;
 
         const string createMetricsTable = """
@@ -83,7 +118,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             """;
 
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = createLogsTable + createSpansTable + createMetricsTable;
+        cmd.CommandText = createLogsTable + createSpansTables + createMetricsTable;
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -113,12 +148,71 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
         var resourceKey = GetResourceKey(resourceSpans.Resource);
         var payload = resourceSpans.ToByteArray();
 
-        using var cmd = _connection!.CreateCommand();
-        cmd.CommandText = "INSERT INTO spans (resource_key, payload) VALUES (@resource_key, @payload)";
-        cmd.Parameters.AddWithValue("@resource_key", resourceKey);
-        cmd.Parameters.AddWithValue("@payload", payload);
+        using var transaction = _connection!.BeginTransaction();
+        try
+        {
+            // Insert the full proto payload blob for startup replay.
+            long spansId;
+            using (var insertBatch = _connection.CreateCommand())
+            {
+                insertBatch.Transaction = transaction;
+                insertBatch.CommandText = "INSERT INTO spans (resource_key, payload) VALUES (@resource_key, @payload); SELECT last_insert_rowid();";
+                insertBatch.Parameters.AddWithValue("@resource_key", resourceKey);
+                insertBatch.Parameters.AddWithValue("@payload", payload);
+                var result = await insertBatch.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                spansId = (long)result!;
+            }
 
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            // Insert structured per-span rows for parent-child relationship queries.
+            using var insertSpan = _connection.CreateCommand();
+            insertSpan.Transaction = transaction;
+            insertSpan.CommandText = """
+                INSERT OR IGNORE INTO span_index
+                    (span_id, trace_id, parent_span_id, spans_id, name, kind,
+                     start_time_unix_nano, end_time_unix_nano, status_code)
+                VALUES
+                    (@span_id, @trace_id, @parent_span_id, @spans_id, @name, @kind,
+                     @start_time_unix_nano, @end_time_unix_nano, @status_code)
+                """;
+
+            var pSpanId = insertSpan.Parameters.Add("@span_id", SqliteType.Text);
+            var pTraceId = insertSpan.Parameters.Add("@trace_id", SqliteType.Text);
+            var pParentSpanId = insertSpan.Parameters.Add("@parent_span_id", SqliteType.Text);
+            var pSpansId = insertSpan.Parameters.Add("@spans_id", SqliteType.Integer);
+            var pName = insertSpan.Parameters.Add("@name", SqliteType.Text);
+            var pKind = insertSpan.Parameters.Add("@kind", SqliteType.Integer);
+            var pStartTime = insertSpan.Parameters.Add("@start_time_unix_nano", SqliteType.Integer);
+            var pEndTime = insertSpan.Parameters.Add("@end_time_unix_nano", SqliteType.Integer);
+            var pStatusCode = insertSpan.Parameters.Add("@status_code", SqliteType.Integer);
+
+            pSpansId.Value = spansId;
+
+            foreach (var scopeSpans in resourceSpans.ScopeSpans)
+            {
+                foreach (var span in scopeSpans.Spans)
+                {
+                    pSpanId.Value = span.SpanId.ToHexString();
+                    pTraceId.Value = span.TraceId.ToHexString();
+                    pParentSpanId.Value = span.ParentSpanId.IsEmpty
+                        ? DBNull.Value
+                        : (object)span.ParentSpanId.ToHexString();
+                    pName.Value = span.Name;
+                    pKind.Value = (int)span.Kind;
+                    pStartTime.Value = (long)span.StartTimeUnixNano;
+                    pEndTime.Value = (long)span.EndTimeUnixNano;
+                    pStatusCode.Value = span.Status is null ? 0 : (int)span.Status.Code;
+
+                    await insertSpan.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -241,3 +335,4 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
         return DateTime.UnixEpoch.AddTicks((long)(minNanos / 100)).ToString("o");
     }
 }
+
