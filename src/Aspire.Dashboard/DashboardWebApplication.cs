@@ -283,7 +283,8 @@ public sealed class DashboardWebApplication : IAsyncDisposable
         // Register telemetry persistence storage based on configuration.
         if (!string.IsNullOrEmpty(dashboardOptions.Storage.SqlitePath))
         {
-            builder.Services.AddSingleton<ITelemetryStorage>(new SqliteTelemetryStorage(dashboardOptions.Storage.SqlitePath));
+            var sqlitePath = dashboardOptions.Storage.SqlitePath;
+            builder.Services.AddSingleton<ITelemetryStorage>(sp => new SqliteTelemetryStorage(sqlitePath));
         }
         else
         {

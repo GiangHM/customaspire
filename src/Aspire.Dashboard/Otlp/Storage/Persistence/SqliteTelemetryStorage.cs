@@ -15,6 +15,10 @@ namespace Aspire.Dashboard.Otlp.Storage.Persistence;
 /// </summary>
 internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 {
+    private const string TelemetryLogsTable = "telemetry_logs";
+    private const string TelemetrySpansTable = "telemetry_spans";
+    private const string TelemetryMetricsTable = "telemetry_metrics";
+
     private readonly string _databasePath;
     private SqliteConnection? _connection;
 
@@ -71,23 +75,24 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     /// <inheritdoc />
     public async Task WriteLogsAsync(ResourceLogs resourceLogs, CancellationToken cancellationToken = default)
     {
-        await InsertBytesAsync("telemetry_logs", resourceLogs.ToByteArray(), cancellationToken).ConfigureAwait(false);
+        await InsertBytesAsync(TelemetryLogsTable, resourceLogs.ToByteArray(), cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task WriteSpansAsync(ResourceSpans resourceSpans, CancellationToken cancellationToken = default)
     {
-        await InsertBytesAsync("telemetry_spans", resourceSpans.ToByteArray(), cancellationToken).ConfigureAwait(false);
+        await InsertBytesAsync(TelemetrySpansTable, resourceSpans.ToByteArray(), cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task WriteMetricsAsync(ResourceMetrics resourceMetrics, CancellationToken cancellationToken = default)
     {
-        await InsertBytesAsync("telemetry_metrics", resourceMetrics.ToByteArray(), cancellationToken).ConfigureAwait(false);
+        await InsertBytesAsync(TelemetryMetricsTable, resourceMetrics.ToByteArray(), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task InsertBytesAsync(string tableName, byte[] data, CancellationToken cancellationToken)
     {
+        EnsureKnownTableName(tableName);
         EnsureInitialized();
         var command = _connection!.CreateCommand();
         await using (command.ConfigureAwait(false))
@@ -102,21 +107,21 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     public IAsyncEnumerable<ResourceLogs> ReadLogsAsync(CancellationToken cancellationToken = default)
     {
         EnsureInitialized();
-        return ReadRowsAsync("telemetry_logs", ResourceLogs.Parser.ParseFrom, cancellationToken);
+        return ReadRowsAsync(TelemetryLogsTable, ResourceLogs.Parser.ParseFrom, cancellationToken);
     }
 
     /// <inheritdoc />
     public IAsyncEnumerable<ResourceSpans> ReadSpansAsync(CancellationToken cancellationToken = default)
     {
         EnsureInitialized();
-        return ReadRowsAsync("telemetry_spans", ResourceSpans.Parser.ParseFrom, cancellationToken);
+        return ReadRowsAsync(TelemetrySpansTable, ResourceSpans.Parser.ParseFrom, cancellationToken);
     }
 
     /// <inheritdoc />
     public IAsyncEnumerable<ResourceMetrics> ReadMetricsAsync(CancellationToken cancellationToken = default)
     {
         EnsureInitialized();
-        return ReadRowsAsync("telemetry_metrics", ResourceMetrics.Parser.ParseFrom, cancellationToken);
+        return ReadRowsAsync(TelemetryMetricsTable, ResourceMetrics.Parser.ParseFrom, cancellationToken);
     }
 
     private async IAsyncEnumerable<T> ReadRowsAsync<T>(
@@ -124,6 +129,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
         Func<byte[], T> deserialize,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        EnsureKnownTableName(tableName);
         var command = _connection!.CreateCommand();
         await using (command.ConfigureAwait(false))
         {
@@ -145,6 +151,14 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
         if (_connection is null)
         {
             throw new InvalidOperationException($"{nameof(SqliteTelemetryStorage)} has not been initialized. Call {nameof(InitializeAsync)} first.");
+        }
+    }
+
+    private static void EnsureKnownTableName(string tableName)
+    {
+        if (tableName != TelemetryLogsTable && tableName != TelemetrySpansTable && tableName != TelemetryMetricsTable)
+        {
+            throw new ArgumentException($"Unknown table name: {tableName}", nameof(tableName));
         }
     }
 

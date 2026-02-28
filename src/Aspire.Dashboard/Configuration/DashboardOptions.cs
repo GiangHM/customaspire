@@ -32,8 +32,7 @@ public sealed class StorageOptions
     /// <summary>
     /// Gets or sets the file path to the SQLite database used for persisting telemetry data.
     /// When set, telemetry data (logs, traces, metrics) is written to the specified SQLite file and
-    /// replayed on dashboard restart. When <see langword="null"/> or empty, persistence is disabled
-    /// and the <c>NullTelemetryStorage</c> no-op implementation is used.
+    /// replayed on dashboard restart. When <see langword="null"/> or empty, persistence is disabled.
     /// </summary>
     public string? SqlitePath { get; set; }
 }
