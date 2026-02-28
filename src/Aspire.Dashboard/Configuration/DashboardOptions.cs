@@ -24,19 +24,6 @@ public sealed class DashboardOptions
     public StorageOptions Storage { get; set; } = new();
 }
 
-/// <summary>
-/// Options for configuring persistent telemetry storage.
-/// </summary>
-public sealed class StorageOptions
-{
-    /// <summary>
-    /// Gets or sets the file path for the SQLite database used for telemetry persistence.
-    /// When <c>null</c> or empty, persistence is disabled and a no-op storage is used.
-    /// Configure via <c>Dashboard:Storage:SqlitePath</c>.
-    /// </summary>
-    public string? SqlitePath { get; set; }
-}
-
 // Don't set values after validating/parsing options.
 public sealed class ResourceServiceClientOptions
 {
@@ -506,4 +493,16 @@ public sealed class DebugSessionOptions
         errorMessage = null;
         return true;
     }
+}
+
+/// <summary>
+/// Configuration options for telemetry persistence storage.
+/// </summary>
+public sealed class StorageOptions
+{
+    /// <summary>
+    /// Gets or sets the file-system path to the SQLite database used for telemetry persistence.
+    /// When <see langword="null"/> or empty, persistence is disabled and an in-memory-only store is used.
+    /// </summary>
+    public string? SqlitePath { get; set; }
 }

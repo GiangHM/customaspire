@@ -71,12 +71,7 @@ public sealed partial class TelemetryRepository : IDisposable
     internal List<OtlpSpanLink> SpanLinks => _spanLinks;
     internal List<Subscription> TracesSubscriptions => _tracesSubscriptions;
 
-    public TelemetryRepository(ILoggerFactory loggerFactory, IOptions<DashboardOptions> dashboardOptions, PauseManager pauseManager, IEnumerable<IOutgoingPeerResolver> outgoingPeerResolvers)
-        : this(loggerFactory, dashboardOptions, pauseManager, outgoingPeerResolvers, NullTelemetryStorage.Instance)
-    {
-    }
-
-    public TelemetryRepository(ILoggerFactory loggerFactory, IOptions<DashboardOptions> dashboardOptions, PauseManager pauseManager, IEnumerable<IOutgoingPeerResolver> outgoingPeerResolvers, ITelemetryStorage storage)
+    public TelemetryRepository(ILoggerFactory loggerFactory, IOptions<DashboardOptions> dashboardOptions, PauseManager pauseManager, IEnumerable<IOutgoingPeerResolver> outgoingPeerResolvers, ITelemetryStorage? storage = null)
     {
         _logger = loggerFactory.CreateLogger(typeof(TelemetryRepository));
         _otlpContext = new OtlpContext
@@ -86,7 +81,7 @@ public sealed partial class TelemetryRepository : IDisposable
         };
         _pauseManager = pauseManager;
         _outgoingPeerResolvers = outgoingPeerResolvers.ToArray();
-        _storage = storage;
+        _storage = storage ?? NullTelemetryStorage.Instance;
         _logs = new(_otlpContext.Options.MaxLogCount);
         _traces = new(_otlpContext.Options.MaxTraceCount);
         _traces.ItemRemovedForCapacity += TracesItemRemovedForCapacity;
@@ -338,9 +333,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             AddLogsCore(context, resourceView, rl.ScopeLogs);
             SetResourceHasLogs(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rl);
         }
 
         RaiseSubscriptionChanged(_logSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceLogs resourceLogs)
+    {
+        try
+        {
+            await _storage.WriteLogsAsync(resourceLogs).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist log batch to storage.");
+        }
     }
 
     public void AddLogsCore(AddContext context, OtlpResourceView resourceView, RepeatedField<ScopeLogs> scopeLogs)
@@ -1111,14 +1121,14 @@ public sealed partial class TelemetryRepository : IDisposable
             AddTracesCore(context, resourceView, rs.ScopeSpans);
             SetResourceHasTraces(resourceView.Resource, true);
 
-            // Persist spans to storage (fire-and-forget; errors are logged and do not fail the request).
-            _ = PersistSpansAsync(rs);
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rs);
         }
 
         RaiseSubscriptionChanged(_tracesSubscriptions);
     }
 
-    private async Task PersistSpansAsync(ResourceSpans resourceSpans)
+    private async Task WriteToPersistenceAsync(ResourceSpans resourceSpans)
     {
         try
         {
@@ -1126,7 +1136,7 @@ public sealed partial class TelemetryRepository : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to persist spans to storage.");
+            _logger.LogWarning(ex, "Failed to persist span batch to storage.");
         }
     }
 

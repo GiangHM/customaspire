@@ -286,23 +286,15 @@ public sealed class DashboardWebApplication : IAsyncDisposable
         {
             var options = sp.GetRequiredService<IOptions<DashboardOptions>>().Value;
             var sqlitePath = options.Storage.SqlitePath;
-            if (string.IsNullOrEmpty(sqlitePath))
+            if (!string.IsNullOrEmpty(sqlitePath))
             {
-                return NullTelemetryStorage.Instance;
+                var logger = sp.GetRequiredService<ILogger<SqliteTelemetryStorage>>();
+                return new SqliteTelemetryStorage(sqlitePath, logger);
             }
 
-            var logger = sp.GetRequiredService<ILogger<SqliteTelemetryStorage>>();
-            return new SqliteTelemetryStorage(sqlitePath, logger);
+            return NullTelemetryStorage.Instance;
         });
-        builder.Services.AddSingleton<TelemetryRepository>(sp =>
-        {
-            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
-            var dashboardOptions = sp.GetRequiredService<IOptions<DashboardOptions>>();
-            var pauseManager = sp.GetRequiredService<PauseManager>();
-            var outgoingPeerResolvers = sp.GetServices<IOutgoingPeerResolver>();
-            var storage = sp.GetRequiredService<ITelemetryStorage>();
-            return new TelemetryRepository(loggerFactory, dashboardOptions, pauseManager, outgoingPeerResolvers, storage);
-        });
+        builder.Services.AddSingleton<TelemetryRepository>();
         builder.Services.AddTransient<StructuredLogsViewModel>();
 
         builder.Services.AddTransient<OtlpLogsService>();
