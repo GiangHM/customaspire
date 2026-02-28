@@ -22,6 +22,7 @@ using Aspire.Dashboard.Otlp;
 using Aspire.Dashboard.Otlp.Grpc;
 using Aspire.Dashboard.Otlp.Http;
 using Aspire.Dashboard.Otlp.Storage;
+using Aspire.Dashboard.Otlp.Storage.Persistence;
 using Aspire.Dashboard.Telemetry;
 using Aspire.Dashboard.Utils;
 using Aspire.Hosting;
@@ -281,6 +282,18 @@ public sealed class DashboardWebApplication : IAsyncDisposable
 
         // OTLP services.
         builder.Services.AddGrpc();
+        builder.Services.AddSingleton<ITelemetryStorage>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<DashboardOptions>>().Value;
+            var sqlitePath = options.Storage.SqlitePath;
+            if (!string.IsNullOrEmpty(sqlitePath))
+            {
+                var logger = sp.GetRequiredService<ILogger<SqliteTelemetryStorage>>();
+                return new SqliteTelemetryStorage(sqlitePath, logger);
+            }
+
+            return NullTelemetryStorage.Instance;
+        });
         builder.Services.AddSingleton<TelemetryRepository>();
         builder.Services.AddTransient<StructuredLogsViewModel>();
 
