@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+artifacts/
+**/bin/
+**/obj/
+
+# Test projects
+tests/
+
+# Playground projects
+playground/
+
+# Development tooling
+.vscode/
+.devcontainer/
+.dotnet/
+
+# Docs
+docs/
+
+# Misc
+*.md
+*.cmd
+*.sh
+*.ps1
+yarn.lock
