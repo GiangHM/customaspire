@@ -23,16 +23,19 @@ namespace Aspire.Dashboard.Otlp.Storage.Persistence;
 internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 {
     private readonly string _databasePath;
+    private readonly ILogger<SqliteTelemetryStorage> _logger;
     private SqliteConnection? _connection;
 
     /// <summary>
     /// Initializes a new instance of <see cref="SqliteTelemetryStorage"/>.
     /// </summary>
     /// <param name="databasePath">The file path for the SQLite database.</param>
-    public SqliteTelemetryStorage(string databasePath)
+    /// <param name="logger">Logger for diagnostic messages.</param>
+    public SqliteTelemetryStorage(string databasePath, ILogger<SqliteTelemetryStorage> logger)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         _databasePath = databasePath;
+        _logger = logger;
     }
 
     /// <inheritdoc />
@@ -446,7 +449,7 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
                 TimeUnixNano = endNs
             };
 
-            DeserializeAttributes(attrsJson, dp.Attributes);
+            DeserializeAttributes(attrsJson, dp.Attributes, instrumentId, _logger);
 
             if (valueType == 0)
             {
@@ -485,18 +488,32 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
                 Count = count
             };
 
-            DeserializeAttributes(attrsJson, dp.Attributes);
+            DeserializeAttributes(attrsJson, dp.Attributes, instrumentId, _logger);
 
-            var bucketCounts = JsonSerializer.Deserialize<ulong[]>(bucketCountsJson);
-            if (bucketCounts is not null)
+            try
             {
-                dp.BucketCounts.AddRange(bucketCounts);
+                var bucketCounts = JsonSerializer.Deserialize<ulong[]>(bucketCountsJson);
+                if (bucketCounts is not null)
+                {
+                    dp.BucketCounts.AddRange(bucketCounts);
+                }
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex, "Failed to deserialize bucket_counts_json for histogram data point (instrument_id={InstrumentId}). Skipping bucket counts.", instrumentId);
             }
 
-            var explicitBounds = JsonSerializer.Deserialize<double[]>(boundsJson);
-            if (explicitBounds is not null)
+            try
             {
-                dp.ExplicitBounds.AddRange(explicitBounds);
+                var explicitBounds = JsonSerializer.Deserialize<double[]>(boundsJson);
+                if (explicitBounds is not null)
+                {
+                    dp.ExplicitBounds.AddRange(explicitBounds);
+                }
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex, "Failed to deserialize explicit_bounds_json for histogram data point (instrument_id={InstrumentId}). Skipping explicit bounds.", instrumentId);
             }
 
             dataPoints.Add(dp);
@@ -541,27 +558,34 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
         return JsonSerializer.Serialize(pairs);
     }
 
-    private static void DeserializeAttributes(string json, Google.Protobuf.Collections.RepeatedField<KeyValue> attributes)
+    private static void DeserializeAttributes(string json, Google.Protobuf.Collections.RepeatedField<KeyValue> attributes, long instrumentId, ILogger logger)
     {
         if (json == "[]")
         {
             return;
         }
 
-        var pairs = JsonSerializer.Deserialize<string[][]>(json);
-        if (pairs is not null)
+        try
         {
-            foreach (var pair in pairs)
+            var pairs = JsonSerializer.Deserialize<string[][]>(json);
+            if (pairs is not null)
             {
-                if (pair.Length >= 2)
+                foreach (var pair in pairs)
                 {
-                    attributes.Add(new KeyValue
+                    if (pair.Length >= 2)
                     {
-                        Key = pair[0],
-                        Value = new AnyValue { StringValue = pair[1] }
-                    });
+                        attributes.Add(new KeyValue
+                        {
+                            Key = pair[0],
+                            Value = new AnyValue { StringValue = pair[1] }
+                        });
+                    }
                 }
             }
+        }
+        catch (JsonException ex)
+        {
+            logger.LogWarning(ex, "Failed to deserialize attributes_json for data point (instrument_id={InstrumentId}). Skipping attributes.", instrumentId);
         }
     }
 

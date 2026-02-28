@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Aspire.Dashboard.Otlp.Storage.Persistence;
+using Microsoft.Extensions.Logging.Abstractions;
 using OpenTelemetry.Proto.Common.V1;
 using OpenTelemetry.Proto.Metrics.V1;
 using OpenTelemetry.Proto.Resource.V1;
@@ -17,7 +18,7 @@ public class SqliteTelemetryStorageTests : IAsyncDisposable
     public SqliteTelemetryStorageTests()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"aspire-test-{Guid.NewGuid():N}.db");
-        _storage = new SqliteTelemetryStorage(_dbPath);
+        _storage = new SqliteTelemetryStorage(_dbPath, NullLogger<SqliteTelemetryStorage>.Instance);
     }
 
     public async ValueTask DisposeAsync()

@@ -33,7 +33,15 @@ public sealed class OtlpMetricsService
         // Persist each resource metrics batch to storage (fire-and-forget).
         foreach (var resourceMetrics in request.ResourceMetrics)
         {
-            _ = _storage.WriteMetricsAsync(resourceMetrics);
+            var task = _storage.WriteMetricsAsync(resourceMetrics);
+            if (!task.IsCompletedSuccessfully)
+            {
+                _ = task.ContinueWith(
+                    t => _logger.LogWarning(t.Exception, "Error persisting resource metrics to storage."),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+            }
         }
 
         return new ExportMetricsServiceResponse
