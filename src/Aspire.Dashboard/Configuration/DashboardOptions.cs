@@ -507,3 +507,15 @@ public sealed class DebugSessionOptions
         return true;
     }
 }
+
+/// <summary>
+/// Configuration options for telemetry persistence storage.
+/// </summary>
+public sealed class StorageOptions
+{
+    /// <summary>
+    /// Gets or sets the file-system path to the SQLite database used for telemetry persistence.
+    /// When <see langword="null"/> or empty, persistence is disabled and an in-memory-only store is used.
+    /// </summary>
+    public string? SqlitePath { get; set; }
+}

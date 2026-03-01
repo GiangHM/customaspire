@@ -12,6 +12,7 @@ using Aspire.Dashboard.Model;
 using Aspire.Dashboard.Model.Otlp;
 using Aspire.Dashboard.Otlp.Model;
 using Aspire.Dashboard.Otlp.Model.MetricValues;
+using Aspire.Dashboard.Otlp.Storage.Persistence;
 using Aspire.Dashboard.Utils;
 using Google.Protobuf.Collections;
 using Microsoft.Extensions.Options;
@@ -29,6 +30,7 @@ public sealed partial class TelemetryRepository : IDisposable
     private readonly PauseManager _pauseManager;
     private readonly IOutgoingPeerResolver[] _outgoingPeerResolvers;
     private readonly ILogger _logger;
+    private readonly ITelemetryStorage _storage;
 
     private readonly object _lock = new();
     internal TimeSpan _subscriptionMinExecuteInterval = TimeSpan.FromMilliseconds(100);
@@ -69,7 +71,7 @@ public sealed partial class TelemetryRepository : IDisposable
     internal List<OtlpSpanLink> SpanLinks => _spanLinks;
     internal List<Subscription> TracesSubscriptions => _tracesSubscriptions;
 
-    public TelemetryRepository(ILoggerFactory loggerFactory, IOptions<DashboardOptions> dashboardOptions, PauseManager pauseManager, IEnumerable<IOutgoingPeerResolver> outgoingPeerResolvers)
+    public TelemetryRepository(ILoggerFactory loggerFactory, IOptions<DashboardOptions> dashboardOptions, PauseManager pauseManager, IEnumerable<IOutgoingPeerResolver> outgoingPeerResolvers, ITelemetryStorage? storage = null)
     {
         _logger = loggerFactory.CreateLogger(typeof(TelemetryRepository));
         _otlpContext = new OtlpContext
@@ -79,6 +81,7 @@ public sealed partial class TelemetryRepository : IDisposable
         };
         _pauseManager = pauseManager;
         _outgoingPeerResolvers = outgoingPeerResolvers.ToArray();
+        _storage = storage ?? NullTelemetryStorage.Instance;
         _logs = new(_otlpContext.Options.MaxLogCount);
         _traces = new(_otlpContext.Options.MaxTraceCount);
         _traces.ItemRemovedForCapacity += TracesItemRemovedForCapacity;
@@ -330,9 +333,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             AddLogsCore(context, resourceView, rl.ScopeLogs);
             SetResourceHasLogs(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rl);
         }
 
         RaiseSubscriptionChanged(_logSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceLogs resourceLogs)
+    {
+        try
+        {
+            await _storage.WriteLogsAsync(resourceLogs).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist log batch to storage.");
+        }
     }
 
     public void AddLogsCore(AddContext context, OtlpResourceView resourceView, RepeatedField<ScopeLogs> scopeLogs)
@@ -1073,9 +1091,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             resourceView.Resource.AddMetrics(context, rm.ScopeMetrics);
             SetResourceHasMetrics(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rm);
         }
 
         RaiseSubscriptionChanged(_metricsSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceMetrics resourceMetrics)
+    {
+        try
+        {
+            await _storage.WriteMetricsAsync(resourceMetrics).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist metric batch to storage.");
+        }
     }
 
     public void AddTraces(AddContext context, RepeatedField<ResourceSpans> resourceSpans)
@@ -1102,9 +1135,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             AddTracesCore(context, resourceView, rs.ScopeSpans);
             SetResourceHasTraces(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rs);
         }
 
         RaiseSubscriptionChanged(_tracesSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceSpans resourceSpans)
+    {
+        try
+        {
+            await _storage.WriteSpansAsync(resourceSpans).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist span batch to storage.");
+        }
     }
 
     private static OtlpSpanStatusCode ConvertStatus(Status? status)
