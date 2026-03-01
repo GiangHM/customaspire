@@ -1091,9 +1091,24 @@ public sealed partial class TelemetryRepository : IDisposable
 
             resourceView.Resource.AddMetrics(context, rm.ScopeMetrics);
             SetResourceHasMetrics(resourceView.Resource, true);
+
+            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
+            _ = WriteToPersistenceAsync(rm);
         }
 
         RaiseSubscriptionChanged(_metricsSubscriptions);
+    }
+
+    private async Task WriteToPersistenceAsync(ResourceMetrics resourceMetrics)
+    {
+        try
+        {
+            await _storage.WriteMetricsAsync(resourceMetrics).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist metric batch to storage.");
+        }
     }
 
     public void AddTraces(AddContext context, RepeatedField<ResourceSpans> resourceSpans)

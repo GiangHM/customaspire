@@ -337,24 +337,35 @@ public sealed class SqliteTelemetryStorageTests : IAsyncDisposable
     // ---- Metrics tests ----
 
     [Fact]
-    public async Task WriteMetricsAsync_AndReadMetricsAsync_RoundTrip()
+    public async Task WriteMetricsAsync_AndReadMetricsAsync_GaugeMetric_RoundTrips()
     {
         await _storage.InitializeAsync();
         var resourceMetrics = new ResourceMetrics
         {
-            Resource = CreateResource("MetricService", "metric-i1"),
+            Resource = CreateResource("svc-gauge", "inst-1"),
             ScopeMetrics =
             {
                 new ScopeMetrics
                 {
+                    Scope = new InstrumentationScope { Name = "my.meter", Version = "1.0" },
                     Metrics =
                     {
                         new Metric
                         {
-                            Name = "requests",
-                            Sum = new Sum
+                            Name = "cpu.usage",
+                            Description = "CPU usage",
+                            Unit = "%",
+                            Gauge = new Gauge
                             {
-                                DataPoints = { new NumberDataPoint { AsInt = 42, TimeUnixNano = 1_000 } }
+                                DataPoints =
+                                {
+                                    new NumberDataPoint
+                                    {
+                                        AsDouble = 42.5,
+                                        StartTimeUnixNano = 1_000_000,
+                                        TimeUnixNano = 2_000_000
+                                    }
+                                }
                             }
                         }
                     }
@@ -364,15 +375,243 @@ public sealed class SqliteTelemetryStorageTests : IAsyncDisposable
 
         await _storage.WriteMetricsAsync(resourceMetrics);
 
-        var items = new List<ResourceMetrics>();
-        await foreach (var item in _storage.ReadMetricsAsync())
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
         {
-            items.Add(item);
+            read.Add(rm);
         }
 
-        Assert.Single(items);
-        Assert.Equal("requests", items[0].ScopeMetrics[0].Metrics[0].Name);
-        Assert.Equal(42, items[0].ScopeMetrics[0].Metrics[0].Sum.DataPoints[0].AsInt);
+        var result = Assert.Single(read);
+        Assert.Equal("svc-gauge", GetServiceName(result.Resource));
+        var scopeMetrics = Assert.Single(result.ScopeMetrics);
+        Assert.Equal("my.meter", scopeMetrics.Scope.Name);
+        Assert.Equal("1.0", scopeMetrics.Scope.Version);
+        var metric = Assert.Single(scopeMetrics.Metrics);
+        Assert.Equal("cpu.usage", metric.Name);
+        Assert.Equal("CPU usage", metric.Description);
+        Assert.Equal("%", metric.Unit);
+        Assert.Equal(Metric.DataOneofCase.Gauge, metric.DataCase);
+        var dp = Assert.Single(metric.Gauge.DataPoints);
+        Assert.Equal(42.5, dp.AsDouble);
+        Assert.Equal(1_000_000UL, dp.StartTimeUnixNano);
+        Assert.Equal(2_000_000UL, dp.TimeUnixNano);
+    }
+
+    [Fact]
+    public async Task WriteMetricsAsync_AndReadMetricsAsync_SumMetricWithAttributes_RoundTrips()
+    {
+        await _storage.InitializeAsync();
+        var resourceMetrics = new ResourceMetrics
+        {
+            Resource = CreateResource("svc-sum", "inst-2"),
+            ScopeMetrics =
+            {
+                new ScopeMetrics
+                {
+                    Scope = new InstrumentationScope { Name = "requests.meter" },
+                    Metrics =
+                    {
+                        new Metric
+                        {
+                            Name = "http.requests",
+                            Description = "Total HTTP requests",
+                            Unit = "requests",
+                            Sum = new Sum
+                            {
+                                AggregationTemporality = AggregationTemporality.Cumulative,
+                                IsMonotonic = true,
+                                DataPoints =
+                                {
+                                    new NumberDataPoint
+                                    {
+                                        AsInt = 100,
+                                        StartTimeUnixNano = 1_000_000,
+                                        TimeUnixNano = 3_000_000,
+                                        Attributes =
+                                        {
+                                            new KeyValue { Key = "method", Value = new AnyValue { StringValue = "GET" } },
+                                            new KeyValue { Key = "status", Value = new AnyValue { StringValue = "200" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        await _storage.WriteMetricsAsync(resourceMetrics);
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        var result = Assert.Single(read);
+        var scopeMetrics = Assert.Single(result.ScopeMetrics);
+        var metric = Assert.Single(scopeMetrics.Metrics);
+        Assert.Equal(Metric.DataOneofCase.Sum, metric.DataCase);
+        Assert.Equal(AggregationTemporality.Cumulative, metric.Sum.AggregationTemporality);
+        Assert.True(metric.Sum.IsMonotonic);
+        var dp = Assert.Single(metric.Sum.DataPoints);
+        Assert.Equal(100L, dp.AsInt);
+        Assert.Equal(2, dp.Attributes.Count);
+        Assert.Equal("GET", dp.Attributes.First(a => a.Key == "method").Value.StringValue);
+        Assert.Equal("200", dp.Attributes.First(a => a.Key == "status").Value.StringValue);
+    }
+
+    [Fact]
+    public async Task WriteMetricsAsync_AndReadMetricsAsync_HistogramMetric_RoundTrips()
+    {
+        await _storage.InitializeAsync();
+        var resourceMetrics = new ResourceMetrics
+        {
+            Resource = CreateResource("svc-hist", "inst-3"),
+            ScopeMetrics =
+            {
+                new ScopeMetrics
+                {
+                    Scope = new InstrumentationScope { Name = "latency.meter" },
+                    Metrics =
+                    {
+                        new Metric
+                        {
+                            Name = "http.latency",
+                            Description = "HTTP latency distribution",
+                            Unit = "ms",
+                            Histogram = new Histogram
+                            {
+                                AggregationTemporality = AggregationTemporality.Delta,
+                                DataPoints =
+                                {
+                                    new HistogramDataPoint
+                                    {
+                                        Count = 10,
+                                        Sum = 150.5,
+                                        StartTimeUnixNano = 1_000_000,
+                                        TimeUnixNano = 5_000_000,
+                                        ExplicitBounds = { 10.0, 50.0, 100.0 },
+                                        BucketCounts = { 2, 3, 4, 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        await _storage.WriteMetricsAsync(resourceMetrics);
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        var result = Assert.Single(read);
+        var scopeMetrics = Assert.Single(result.ScopeMetrics);
+        var metric = Assert.Single(scopeMetrics.Metrics);
+        Assert.Equal("http.latency", metric.Name);
+        Assert.Equal(Metric.DataOneofCase.Histogram, metric.DataCase);
+        Assert.Equal(AggregationTemporality.Delta, metric.Histogram.AggregationTemporality);
+        var dp = Assert.Single(metric.Histogram.DataPoints);
+        Assert.Equal(10UL, dp.Count);
+        Assert.Equal(150.5, dp.Sum);
+        Assert.Equal([10.0, 50.0, 100.0], dp.ExplicitBounds);
+        Assert.Equal([2UL, 3UL, 4UL, 1UL], dp.BucketCounts);
+    }
+
+    [Fact]
+    public async Task WriteMetricsAsync_MultipleResources_EachYieldedSeparately()
+    {
+        await _storage.InitializeAsync();
+
+        await _storage.WriteMetricsAsync(CreateGaugeResourceMetrics("svc-a", "inst-a", "meter-a", "metric-a", 1.0));
+        await _storage.WriteMetricsAsync(CreateGaugeResourceMetrics("svc-b", "inst-b", "meter-b", "metric-b", 2.0));
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        Assert.Equal(2, read.Count);
+        Assert.Contains(read, r => GetServiceName(r.Resource) == "svc-a");
+        Assert.Contains(read, r => GetServiceName(r.Resource) == "svc-b");
+    }
+
+    [Fact]
+    public async Task WriteMetricsAsync_MultipleScopes_AllScopesPreserved()
+    {
+        await _storage.InitializeAsync();
+        var resourceMetrics = new ResourceMetrics
+        {
+            Resource = CreateResource("multi-scope-svc", "inst-1"),
+            ScopeMetrics =
+            {
+                new ScopeMetrics
+                {
+                    Scope = new InstrumentationScope { Name = "meter.one" },
+                    Metrics = { CreateGaugeMetric("metric-1", 10.0) }
+                },
+                new ScopeMetrics
+                {
+                    Scope = new InstrumentationScope { Name = "meter.two" },
+                    Metrics = { CreateGaugeMetric("metric-2", 20.0) }
+                }
+            }
+        };
+
+        await _storage.WriteMetricsAsync(resourceMetrics);
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        var result = Assert.Single(read);
+        Assert.Equal(2, result.ScopeMetrics.Count);
+        var scopeNames = result.ScopeMetrics.Select(s => s.Scope.Name).ToList();
+        Assert.Contains("meter.one", scopeNames);
+        Assert.Contains("meter.two", scopeNames);
+    }
+
+    [Fact]
+    public async Task WriteMetricsAsync_SameResourceTwice_DataPointsAccumulate()
+    {
+        await _storage.InitializeAsync();
+
+        await _storage.WriteMetricsAsync(CreateSumResourceMetrics("svc-same", "inst-x", "my.meter", "counter", 1));
+        await _storage.WriteMetricsAsync(CreateSumResourceMetrics("svc-same", "inst-x", "my.meter", "counter", 2));
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        var result = Assert.Single(read);
+        var scopeMetrics = Assert.Single(result.ScopeMetrics);
+        var metric = Assert.Single(scopeMetrics.Metrics);
+        Assert.Equal(2, metric.Sum.DataPoints.Count);
+    }
+
+    [Fact]
+    public async Task ReadMetricsAsync_EmptyDatabase_ReturnsEmpty()
+    {
+        await _storage.InitializeAsync();
+
+        var read = new List<ResourceMetrics>();
+        await foreach (var rm in _storage.ReadMetricsAsync())
+        {
+            read.Add(rm);
+        }
+
+        Assert.Empty(read);
     }
 
     // ---- Dispose tests ----
@@ -444,4 +683,70 @@ public sealed class SqliteTelemetryStorageTests : IAsyncDisposable
 
         return string.Empty;
     }
+
+    private static ResourceMetrics CreateGaugeResourceMetrics(string serviceName, string instanceId, string meterName, string metricName, double value) => new()
+    {
+        Resource = CreateResource(serviceName, instanceId),
+        ScopeMetrics =
+        {
+            new ScopeMetrics
+            {
+                Scope = new InstrumentationScope { Name = meterName },
+                Metrics = { CreateGaugeMetric(metricName, value) }
+            }
+        }
+    };
+
+    private static ResourceMetrics CreateSumResourceMetrics(string serviceName, string instanceId, string meterName, string metricName, int value) => new()
+    {
+        Resource = CreateResource(serviceName, instanceId),
+        ScopeMetrics =
+        {
+            new ScopeMetrics
+            {
+                Scope = new InstrumentationScope { Name = meterName },
+                Metrics = { CreateSumMetric(metricName, value) }
+            }
+        }
+    };
+
+    private static Metric CreateGaugeMetric(string name, double value) => new()
+    {
+        Name = name,
+        Description = $"Description of {name}",
+        Unit = "units",
+        Gauge = new Gauge
+        {
+            DataPoints =
+            {
+                new NumberDataPoint
+                {
+                    AsDouble = value,
+                    StartTimeUnixNano = 1_000_000,
+                    TimeUnixNano = 2_000_000
+                }
+            }
+        }
+    };
+
+    private static Metric CreateSumMetric(string name, int value) => new()
+    {
+        Name = name,
+        Description = $"Description of {name}",
+        Unit = "count",
+        Sum = new Sum
+        {
+            AggregationTemporality = AggregationTemporality.Cumulative,
+            IsMonotonic = true,
+            DataPoints =
+            {
+                new NumberDataPoint
+                {
+                    AsInt = value,
+                    StartTimeUnixNano = 1_000_000,
+                    TimeUnixNano = 2_000_000
+                }
+            }
+        }
+    };
 }
