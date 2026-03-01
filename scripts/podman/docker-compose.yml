@@ -1,0 +1,88 @@
+# docker-compose.yml for podman-compose
+#
+# This file is designed to work with both podman-compose and docker compose.
+# It demonstrates a typical Aspire application stack with volume mounts for persistence.
+#
+# Usage with podman-compose:
+#   podman-compose up -d
+#   podman-compose down
+#   podman-compose logs -f
+#
+# Usage with docker compose:
+#   docker compose up -d
+#   docker compose down
+#
+# Prerequisites:
+#   - Copy .env.example to .env and fill in values
+#   - Build app images beforehand if using local builds:
+#       ./build.sh --app-host ../../playground/Redis/Redis.AppHost --tag redis-api:latest
+
+services:
+  redis:
+    image: "docker.io/library/redis:7-alpine"
+    ports:
+      - "6379:6379"
+    volumes:
+      - type: volume
+        source: redis-data
+        target: /data
+        read_only: false
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aspire
+
+  postgres:
+    image: "docker.io/library/postgres:17-alpine"
+    environment:
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:-aspiredb}"
+    ports:
+      - "5432:5432"
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+        read_only: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aspire
+
+  api:
+    image: "${API_IMAGE:-aspire-api:latest}"
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Production"
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+      HTTP_PORTS: "8080"
+      ConnectionStrings__redis: "redis:6379"
+      ConnectionStrings__postgres: "Host=postgres;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD};Database=${POSTGRES_DB:-aspiredb}"
+      OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY: "in_memory"
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - aspire
+
+networks:
+  aspire:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
