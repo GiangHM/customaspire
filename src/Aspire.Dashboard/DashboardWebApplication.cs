@@ -280,6 +280,17 @@ public sealed class DashboardWebApplication : IAsyncDisposable
         builder.Services.AddSingleton<ILoggerProvider, TelemetryLoggerProvider>();
         builder.Services.AddSingleton<ITelemetryErrorRecorder, TelemetryErrorRecorder>();
 
+        // Register telemetry persistence storage based on configuration.
+        if (!string.IsNullOrEmpty(dashboardOptions.Storage.SqlitePath))
+        {
+            var sqlitePath = dashboardOptions.Storage.SqlitePath;
+            builder.Services.AddSingleton<ITelemetryStorage>(sp => new SqliteTelemetryStorage(sqlitePath));
+        }
+        else
+        {
+            builder.Services.AddSingleton<ITelemetryStorage>(NullTelemetryStorage.Instance);
+        }
+
         // OTLP services.
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<ITelemetryStorage>(sp =>

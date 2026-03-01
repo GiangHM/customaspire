@@ -1,6 +1,10 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Google.Protobuf;
+using Microsoft.Data.Sqlite;
+using OpenTelemetry.Proto.Logs.V1;
+using OpenTelemetry.Proto.Metrics.V1;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
