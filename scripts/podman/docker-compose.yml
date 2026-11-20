@@ -77,11 +77,33 @@ services:
     networks:
       - aspire
 
+  # Aspire Dashboard with SQLite telemetry persistence.
+  # Build the image first: ./build.sh --app-host src/Aspire.Dashboard --tag aspire-dashboard:latest
+  # The OTLP endpoints are unsecured by default, so the ports are published on localhost only.
+  # Persisted telemetry (log messages, attributes) is stored unencrypted in the dashboard-data volume.
+  dashboard:
+    image: "${DASHBOARD_IMAGE:-aspire-dashboard:latest}"
+    environment:
+      DASHBOARD__STORAGE__SQLITEPATH: "/data/telemetry.db"
+    ports:
+      - "127.0.0.1:18888:18888"
+      - "127.0.0.1:18889:18889"
+      - "127.0.0.1:18890:18890"
+    volumes:
+      - type: volume
+        source: dashboard-data
+        target: /data
+        read_only: false
+    networks:
+      - aspire
+
 networks:
   aspire:
     driver: bridge
 
 volumes:
+  dashboard-data:
+    driver: local
   redis-data:
     driver: local
   postgres-data:

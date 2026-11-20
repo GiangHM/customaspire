@@ -15,6 +15,10 @@ COPY ["Directory.Build.targets", "./"]
 COPY ["Directory.Packages.props", "./"]
 COPY ["NuGet.config", "./"]
 COPY ["global.json", "./"]
+COPY ["src/Directory.Build.props", "src/"]
+COPY ["src/Directory.Build.targets", "src/"]
+# The Arcade SDK and the Directory.Build.* files import from eng/ during restore.
+COPY ["eng/", "eng/"]
 
 # Restore dependencies
 RUN dotnet restore "src/Aspire.Dashboard/Aspire.Dashboard.csproj"
@@ -51,6 +55,15 @@ RUN mkdir -p /data && chown aspire:aspire /data
 
 # Declare /data as a volume for persistent storage
 VOLUME ["/data"]
+
+# Listen addresses for the dashboard UI and the OTLP endpoints.
+ENV ASPNETCORE_URLS=http://+:18888 \
+    ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL=http://+:18889 \
+    ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL=http://+:18890
+
+# Persist telemetry in SQLite on the /data volume so it survives container restarts.
+# Override with an empty value to disable persistence.
+ENV DASHBOARD__STORAGE__SQLITEPATH=/data/telemetry.db
 
 # Run as the non-root user
 USER aspire

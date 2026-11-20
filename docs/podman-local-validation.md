@@ -93,10 +93,18 @@ podman-compose down -v
 
 Named volumes are used so that data survives container restarts:
 
-| Service    | Volume name     | Container path              |
-|------------|-----------------|-----------------------------|
-| Redis      | `redis-data`    | `/data`                     |
-| PostgreSQL | `postgres-data` | `/var/lib/postgresql/data`  |
+| Service    | Volume name      | Container path              |
+|------------|------------------|-----------------------------|
+| Redis      | `redis-data`     | `/data`                     |
+| PostgreSQL | `postgres-data`  | `/var/lib/postgresql/data`  |
+| Dashboard  | `dashboard-data` | `/data`                     |
+
+The Aspire Dashboard image stores telemetry in SQLite at `/data/telemetry.db`
+(`DASHBOARD__STORAGE__SQLITEPATH`). Mount a volume at `/data` to keep logs, traces and metrics across container
+restarts; without a volume they are lost when the container is removed. The database is bounded by the dashboard's
+telemetry limits, and is stored unencrypted. Set `DASHBOARD__STORAGE__SQLITEPATH` to an empty value to disable it.
+When mounting a host directory instead of a named volume with rootless Podman, make it writable by uid 10001
+(for example `-v ./data:/data:U`).
 
 Podman stores these volumes under `~/.local/share/containers/storage/volumes/` (rootless) or
 `/var/lib/containers/storage/volumes/` (rootful). Use `podman volume ls` and
