@@ -8,10 +8,13 @@ using System.Text.Json.Nodes;
 using Aspire.Dashboard.Configuration;
 using Aspire.Dashboard.Model.Assistant;
 using Aspire.Dashboard.Otlp.Http;
+using Aspire.Dashboard.Otlp.Model;
+using Aspire.Dashboard.Otlp.Storage;
 using Aspire.Dashboard.Telemetry;
 using Aspire.Hosting;
 using Aspire.Tests.Shared.Telemetry;
 using Google.Protobuf;
+using Google.Protobuf.Collections;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.InternalTesting;
@@ -25,6 +28,7 @@ using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
 using OpenTelemetry.Proto.Collector.Logs.V1;
+using OpenTelemetry.Proto.Logs.V1;
 using Xunit;
 
 namespace Aspire.Dashboard.Tests.Integration;
@@ -1077,7 +1081,7 @@ public class StartupTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    public async Task StorageOptions_SqlitePathConfigured_RegistersSqliteTelemetryStorage()
+    public async Task StorageOptions_SqlitePathConfigured_RegistersQueuedSqliteTelemetryStorage()
     {
         // Arrange
         var dbPath = Path.Combine(Path.GetTempPath(), $"aspire-di-test-{Guid.NewGuid():N}.db");
@@ -1092,13 +1096,73 @@ public class StartupTests(ITestOutputHelper testOutputHelper)
 
             // Assert
             var storage = app.Services.GetRequiredService<Aspire.Dashboard.Otlp.Storage.Persistence.ITelemetryStorage>();
-            Assert.IsType<Aspire.Dashboard.Otlp.Storage.Persistence.SqliteTelemetryStorage>(storage);
+            Assert.IsType<Aspire.Dashboard.Otlp.Storage.Persistence.QueuedTelemetryStorage>(storage);
         }
         finally
         {
             if (File.Exists(dbPath))
             {
                 File.Delete(dbPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StorageOptions_SqlitePathConfigured_TelemetrySurvivesRestart()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"aspire-restart-test-{Guid.NewGuid():N}", "telemetry.db");
+        void Configure(Dictionary<string, string?> data) => data[DashboardConfigNames.DashboardStorageSqlitePathName.ConfigKey] = dbPath;
+
+        try
+        {
+            // First run: the hosted service creates the database, then telemetry is written through the repository.
+            await using (var app = IntegrationTestHelpers.CreateDashboardWebApplication(testOutputHelper, additionalConfiguration: Configure))
+            {
+                await app.StartAsync().DefaultTimeout();
+                Assert.True(File.Exists(dbPath));
+
+                var repository = app.Services.GetRequiredService<TelemetryRepository>();
+                repository.AddLogs(new AddContext(), new RepeatedField<ResourceLogs>
+                {
+                    new ResourceLogs
+                    {
+                        Resource = TelemetryTestHelpers.CreateResource(name: "app1", instanceId: "instance1"),
+                        ScopeLogs = { new ScopeLogs { Scope = TelemetryTestHelpers.CreateScope(), LogRecords = { TelemetryTestHelpers.CreateLogRecord(message: "survives-restart") } } }
+                    }
+                });
+
+                // Persistence is fire-and-forget; wait until the write is visible in the database.
+                var storage = app.Services.GetRequiredService<Aspire.Dashboard.Otlp.Storage.Persistence.ITelemetryStorage>();
+                await AsyncTestHelpers.AssertIsTrueRetryAsync(async () =>
+                {
+                    await foreach (var _ in storage.ReadLogsAsync())
+                    {
+                        return true;
+                    }
+
+                    return false;
+                }, "Log was not persisted.");
+            }
+
+            // Second run: a new application over the same file restores the log before serving.
+            await using (var app = IntegrationTestHelpers.CreateDashboardWebApplication(testOutputHelper, additionalConfiguration: Configure))
+            {
+                await app.StartAsync().DefaultTimeout();
+
+                var repository = app.Services.GetRequiredService<TelemetryRepository>();
+                var logs = repository.GetLogs(new GetLogsContext { ResourceKey = null, StartIndex = 0, Count = 10, Filters = [] });
+                Assert.Equal("survives-restart", Assert.Single(logs.Items).Message);
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(Path.GetDirectoryName(dbPath)!, recursive: true);
+            }
+            catch
+            {
+                // Best-effort cleanup.
             }
         }
     }

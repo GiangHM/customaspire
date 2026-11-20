@@ -1,10 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Google.Protobuf;
-using Microsoft.Data.Sqlite;
-using OpenTelemetry.Proto.Logs.V1;
-using OpenTelemetry.Proto.Metrics.V1;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -46,27 +42,49 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 {
     private readonly string _databasePath;
     private readonly ILogger<SqliteTelemetryStorage> _logger;
+    private readonly SqliteRetentionLimits? _retention;
+    // The single shared connection is not safe for concurrent use, so all access is serialized.
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private SqliteConnection? _connection;
+    private int _writesSincePrune;
+
+    // Pruning scans the tables, so it runs periodically rather than after every write.
+    private const int PruneEveryWrites = 1000;
 
     /// <summary>
     /// Initializes a new instance of <see cref="SqliteTelemetryStorage"/>.
     /// </summary>
     /// <param name="databasePath">The file-system path to the SQLite database file.</param>
     /// <param name="logger">Logger instance.</param>
-    public SqliteTelemetryStorage(string databasePath, ILogger<SqliteTelemetryStorage> logger)
+    /// <param name="retention">Limits that bound the database size. When <see langword="null"/>, nothing is ever deleted.</param>
+    public SqliteTelemetryStorage(string databasePath, ILogger<SqliteTelemetryStorage> logger, SqliteRetentionLimits? retention = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(databasePath);
         _databasePath = databasePath;
         _logger = logger;
+        _retention = retention;
     }
 
     /// <inheritdoc />
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        if (_connection is not null)
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(_databasePath));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
         var connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = _databasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            // A single long-lived connection is used, so pooling adds nothing and would keep the file open after disposal.
+            Pooling = false
         }.ToString();
 
         _connection = new SqliteConnection(connectionString);
@@ -74,7 +92,102 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 
         await CreateSchemaAsync(_connection, cancellationToken).ConfigureAwait(false);
 
+        // Trim a database that grew beyond the limits (for example, after the limits were lowered) before it is replayed.
+        await PruneAsync(cancellationToken).ConfigureAwait(false);
+
         _logger.LogDebug("SQLite telemetry storage initialized at '{Path}'.", _databasePath);
+    }
+
+    private async Task PruneIfDueAsync(CancellationToken cancellationToken)
+    {
+        if (_retention is null || ++_writesSincePrune < PruneEveryWrites)
+        {
+            return;
+        }
+
+        _writesSincePrune = 0;
+
+        try
+        {
+            await PruneAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A failed prune must not fail the write that triggered it; it is retried after the next interval.
+            _logger.LogWarning(ex, "Failed to prune persisted telemetry.");
+        }
+    }
+
+    private async Task PruneAsync(CancellationToken cancellationToken)
+    {
+        if (_retention is null)
+        {
+            return;
+        }
+
+        using var transaction = _connection!.BeginTransaction();
+
+        var deletedLogs = await DeleteOlderBatchesAsync("logs", _retention.MaxLogBatches, null, transaction, cancellationToken).ConfigureAwait(false);
+        var deletedSpans = await DeleteOlderBatchesAsync("spans", _retention.MaxSpanBatches, "span_index", transaction, cancellationToken).ConfigureAwait(false);
+        var deletedPoints = 0;
+        foreach (var table in (string[])["number_data_points", "histogram_data_points"])
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.Transaction = transaction;
+            // Keep the newest N data points of each instrument.
+            cmd.CommandText = $"""
+                DELETE FROM {table} WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY id DESC) AS row_number
+                        FROM {table})
+                    WHERE row_number > @keep)
+                """;
+            cmd.Parameters.AddWithValue("@keep", _retention.MaxMetricPointsPerInstrument);
+            deletedPoints += await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        transaction.Commit();
+
+        if (deletedLogs + deletedSpans + deletedPoints > 0)
+        {
+            _logger.LogDebug("Pruned persisted telemetry: {Logs} log batch(es), {Spans} span batch(es), {Points} metric point(s).", deletedLogs, deletedSpans, deletedPoints);
+        }
+    }
+
+    /// <summary>
+    /// Deletes all but the newest <paramref name="keep"/> rows of <paramref name="table"/>, and the rows of
+    /// <paramref name="childTable"/> that belong to them (its <c>spans_id</c> column references the parent).
+    /// </summary>
+    private async Task<int> DeleteOlderBatchesAsync(string table, int keep, string? childTable, SqliteTransaction transaction, CancellationToken cancellationToken)
+    {
+        long? threshold;
+        using (var cmd = _connection!.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = $"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET @keep";
+            cmd.Parameters.AddWithValue("@keep", keep);
+            threshold = (long?)await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (threshold is null)
+        {
+            return 0;
+        }
+
+        if (childTable is not null)
+        {
+            using var deleteChildren = _connection.CreateCommand();
+            deleteChildren.Transaction = transaction;
+            deleteChildren.CommandText = $"DELETE FROM {childTable} WHERE spans_id <= @threshold";
+            deleteChildren.Parameters.AddWithValue("@threshold", threshold.Value);
+            await deleteChildren.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        using var delete = _connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = $"DELETE FROM {table} WHERE id <= @threshold";
+        delete.Parameters.AddWithValue("@threshold", threshold.Value);
+        return await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task CreateSchemaAsync(SqliteConnection connection, CancellationToken cancellationToken)
@@ -177,6 +290,20 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     /// <inheritdoc />
     public async Task WriteLogsAsync(ResourceLogs resourceLogs, CancellationToken cancellationToken = default)
     {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteLogsCoreAsync(resourceLogs, cancellationToken).ConfigureAwait(false);
+            await PruneIfDueAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task WriteLogsCoreAsync(ResourceLogs resourceLogs, CancellationToken cancellationToken)
+    {
         EnsureInitialized();
 
         var resourceKey = GetResourceKey(resourceLogs.Resource);
@@ -194,6 +321,20 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 
     /// <inheritdoc />
     public async Task WriteSpansAsync(ResourceSpans resourceSpans, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteSpansCoreAsync(resourceSpans, cancellationToken).ConfigureAwait(false);
+            await PruneIfDueAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task WriteSpansCoreAsync(ResourceSpans resourceSpans, CancellationToken cancellationToken)
     {
         EnsureInitialized();
 
@@ -270,6 +411,20 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     /// <inheritdoc />
     public async Task WriteMetricsAsync(ResourceMetrics resourceMetrics, CancellationToken cancellationToken = default)
     {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteMetricsCoreAsync(resourceMetrics, cancellationToken).ConfigureAwait(false);
+            await PruneIfDueAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task WriteMetricsCoreAsync(ResourceMetrics resourceMetrics, CancellationToken cancellationToken)
+    {
         EnsureInitialized();
 
         var resourceId = await GetOrInsertResourceAsync(resourceMetrics.Resource, cancellationToken).ConfigureAwait(false);
@@ -314,6 +469,22 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     /// <inheritdoc />
     public async IAsyncEnumerable<ResourceLogs> ReadLogsAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await foreach (var item in ReadLogsCoreAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return item;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async IAsyncEnumerable<ResourceLogs> ReadLogsCoreAsync([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         EnsureInitialized();
 
         using var cmd = _connection!.CreateCommand();
@@ -330,6 +501,22 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
     /// <inheritdoc />
     public async IAsyncEnumerable<ResourceSpans> ReadSpansAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await foreach (var item in ReadSpansCoreAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return item;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async IAsyncEnumerable<ResourceSpans> ReadSpansCoreAsync([EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         EnsureInitialized();
 
         using var cmd = _connection!.CreateCommand();
@@ -345,6 +532,22 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
 
     /// <inheritdoc />
     public async IAsyncEnumerable<ResourceMetrics> ReadMetricsAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await foreach (var item in ReadMetricsCoreAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return item;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async IAsyncEnumerable<ResourceMetrics> ReadMetricsCoreAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
         EnsureInitialized();
 
@@ -463,6 +666,8 @@ internal sealed class SqliteTelemetryStorage : ITelemetryStorage
             await _connection.DisposeAsync().ConfigureAwait(false);
             _connection = null;
         }
+
+        _gate.Dispose();
     }
 
     private void EnsureInitialized()

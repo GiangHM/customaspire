@@ -280,31 +280,27 @@ public sealed class DashboardWebApplication : IAsyncDisposable
         builder.Services.AddSingleton<ILoggerProvider, TelemetryLoggerProvider>();
         builder.Services.AddSingleton<ITelemetryErrorRecorder, TelemetryErrorRecorder>();
 
+        // OTLP services.
+        builder.Services.AddGrpc();
+
         // Register telemetry persistence storage based on configuration.
-        if (!string.IsNullOrEmpty(dashboardOptions.Storage.SqlitePath))
+        // When a SQLite path is configured, writes are queued to a background writer and the database is bounded by the
+        // telemetry limits. The storage is initialized and replayed into the repository by TelemetryStorageInitializer
+        // before the dashboard starts accepting telemetry.
+        var sqlitePath = dashboardOptions.Storage.SqlitePath;
+        if (!string.IsNullOrEmpty(sqlitePath))
         {
-            var sqlitePath = dashboardOptions.Storage.SqlitePath;
-            builder.Services.AddSingleton<ITelemetryStorage>(sp => new SqliteTelemetryStorage(sqlitePath));
+            var retention = SqliteRetentionLimits.FromTelemetryLimits(dashboardOptions.TelemetryLimits);
+            builder.Services.AddSingleton<ITelemetryStorage>(sp => new QueuedTelemetryStorage(
+                new SqliteTelemetryStorage(sqlitePath, sp.GetRequiredService<ILogger<SqliteTelemetryStorage>>(), retention),
+                sp.GetRequiredService<ILogger<QueuedTelemetryStorage>>()));
+            builder.Services.AddHostedService<TelemetryStorageInitializer>();
         }
         else
         {
             builder.Services.AddSingleton<ITelemetryStorage>(NullTelemetryStorage.Instance);
         }
 
-        // OTLP services.
-        builder.Services.AddGrpc();
-        builder.Services.AddSingleton<ITelemetryStorage>(sp =>
-        {
-            var options = sp.GetRequiredService<IOptions<DashboardOptions>>().Value;
-            var sqlitePath = options.Storage.SqlitePath;
-            if (!string.IsNullOrEmpty(sqlitePath))
-            {
-                var logger = sp.GetRequiredService<ILogger<SqliteTelemetryStorage>>();
-                return new SqliteTelemetryStorage(sqlitePath, logger);
-            }
-
-            return NullTelemetryStorage.Instance;
-        });
         builder.Services.AddSingleton<TelemetryRepository>();
         builder.Services.AddTransient<StructuredLogsViewModel>();
 

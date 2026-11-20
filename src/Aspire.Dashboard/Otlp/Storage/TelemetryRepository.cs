@@ -309,9 +309,41 @@ public sealed partial class TelemetryRepository : IDisposable
         }
     }
 
-    public void AddLogs(AddContext context, RepeatedField<ResourceLogs> resourceLogs)
+    /// <summary>
+    /// Restores in-memory state from persistent storage. Replayed data is not written back to storage.
+    /// Intended to be called once at startup, before the dashboard accepts new telemetry.
+    /// </summary>
+    internal async Task ReplayFromStorageAsync(CancellationToken cancellationToken = default)
     {
-        if (_pauseManager.AreStructuredLogsPaused(out _))
+        var logCount = 0;
+        await foreach (var resourceLogs in _storage.ReadLogsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            AddLogs(new AddContext(), [resourceLogs], isReplay: true);
+            logCount++;
+        }
+
+        var spanCount = 0;
+        await foreach (var resourceSpans in _storage.ReadSpansAsync(cancellationToken).ConfigureAwait(false))
+        {
+            AddTraces(new AddContext(), [resourceSpans], isReplay: true);
+            spanCount++;
+        }
+
+        var metricCount = 0;
+        await foreach (var resourceMetrics in _storage.ReadMetricsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            AddMetrics(new AddContext(), [resourceMetrics], isReplay: true);
+            metricCount++;
+        }
+
+        _logger.LogInformation("Replayed persisted telemetry: {LogBatches} log batch(es), {SpanBatches} span batch(es), {MetricBatches} metric resource(s).", logCount, spanCount, metricCount);
+    }
+
+    public void AddLogs(AddContext context, RepeatedField<ResourceLogs> resourceLogs) => AddLogs(context, resourceLogs, isReplay: false);
+
+    private void AddLogs(AddContext context, RepeatedField<ResourceLogs> resourceLogs, bool isReplay)
+    {
+        if (!isReplay && _pauseManager.AreStructuredLogsPaused(out _))
         {
             _logger.LogTrace("{Count} incoming structured log(s) ignored because of an active pause.", resourceLogs.Count);
             return;
@@ -334,22 +366,26 @@ public sealed partial class TelemetryRepository : IDisposable
             AddLogsCore(context, resourceView, rl.ScopeLogs);
             SetResourceHasLogs(resourceView.Resource, true);
 
-            // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
-            _ = WriteToPersistenceAsync(rl);
+            // Write-through to persistent storage. The storage queues the write, so this does not block ingestion;
+            // failures are logged but not propagated.
+            if (!isReplay)
+            {
+                _ = PersistAsync(() => _storage.WriteLogsAsync(rl), "log batch");
+            }
         }
 
         RaiseSubscriptionChanged(_logSubscriptions);
     }
 
-    private async Task WriteToPersistenceAsync(ResourceLogs resourceLogs)
+    private async Task PersistAsync(Func<Task> write, string description)
     {
         try
         {
-            await _storage.WriteLogsAsync(resourceLogs).ConfigureAwait(false);
+            await write().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to persist log batch to storage.");
+            _logger.LogWarning(ex, "Failed to persist {Description} to storage.", description);
         }
     }
 
@@ -1067,9 +1103,11 @@ public sealed partial class TelemetryRepository : IDisposable
         }
     }
 
-    public void AddMetrics(AddContext context, RepeatedField<ResourceMetrics> resourceMetrics)
+    public void AddMetrics(AddContext context, RepeatedField<ResourceMetrics> resourceMetrics) => AddMetrics(context, resourceMetrics, isReplay: false);
+
+    private void AddMetrics(AddContext context, RepeatedField<ResourceMetrics> resourceMetrics, bool isReplay)
     {
-        if (_pauseManager.AreMetricsPaused(out _))
+        if (!isReplay && _pauseManager.AreMetricsPaused(out _))
         {
             _logger.LogTrace("{Count} incoming metric(s) ignored because of an active pause.", resourceMetrics.Count);
             return;
@@ -1093,27 +1131,20 @@ public sealed partial class TelemetryRepository : IDisposable
             SetResourceHasMetrics(resourceView.Resource, true);
 
             // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
-            _ = WriteToPersistenceAsync(rm);
+            if (!isReplay)
+            {
+                _ = PersistAsync(() => _storage.WriteMetricsAsync(rm), "metric batch");
+            }
         }
 
         RaiseSubscriptionChanged(_metricsSubscriptions);
     }
 
-    private async Task WriteToPersistenceAsync(ResourceMetrics resourceMetrics)
-    {
-        try
-        {
-            await _storage.WriteMetricsAsync(resourceMetrics).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to persist metric batch to storage.");
-        }
-    }
+    public void AddTraces(AddContext context, RepeatedField<ResourceSpans> resourceSpans) => AddTraces(context, resourceSpans, isReplay: false);
 
-    public void AddTraces(AddContext context, RepeatedField<ResourceSpans> resourceSpans)
+    private void AddTraces(AddContext context, RepeatedField<ResourceSpans> resourceSpans, bool isReplay)
     {
-        if (_pauseManager.AreTracesPaused(out _))
+        if (!isReplay && _pauseManager.AreTracesPaused(out _))
         {
             _logger.LogTrace("{Count} incoming trace(s) ignored because of an active pause.", resourceSpans.Count);
             return;
@@ -1137,22 +1168,13 @@ public sealed partial class TelemetryRepository : IDisposable
             SetResourceHasTraces(resourceView.Resource, true);
 
             // Write-through to persistent storage. Fire-and-forget; failures are logged but not propagated.
-            _ = WriteToPersistenceAsync(rs);
+            if (!isReplay)
+            {
+                _ = PersistAsync(() => _storage.WriteSpansAsync(rs), "span batch");
+            }
         }
 
         RaiseSubscriptionChanged(_tracesSubscriptions);
-    }
-
-    private async Task WriteToPersistenceAsync(ResourceSpans resourceSpans)
-    {
-        try
-        {
-            await _storage.WriteSpansAsync(resourceSpans).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to persist span batch to storage.");
-        }
     }
 
     private static OtlpSpanStatusCode ConvertStatus(Status? status)
